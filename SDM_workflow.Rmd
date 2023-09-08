@@ -1,0 +1,887 @@
+
+---
+title: "Xenopus laevis ENM"
+output: html_notebook
+---
+
+# loading package libraries
+
+
+```{r, results= "hide"}
+library(raster)
+library(rgdal)
+library(CoordinateCleaner)
+library(dplyr)
+library(ggplot2)
+library(rgbif)
+library(sp)
+library(countrycode)
+library(maps)
+library(rgbif)
+library(countrycode)
+library(rmarkdown)
+library(spThin)
+library(sqldf)
+library(pbdb)
+library(dismo)
+library(ade4)
+library(biomod2)
+library(circlize)
+library(sdm)
+installAll()
+library(ecospat)
+library(maptools)
+library(spocc)
+library(ENMeval)
+library(tmap)
+library(RColorBrewer)
+library(hablar)
+```
+
+# Case study species = "Xenopus laevis"
+
+# Upload and visualize raw data obtained from GBIF.
+
+Manually downloaded the occurrence records from GBIF webportal, to obtain a unique identifier for the query (i.e., DOI). "raw data" were donwloaded as.is, then filtered to only include records with coordinates.
+
+```{r}
+xlRaw <- read.delim(file = "./gbifData/occurrence.txt", header = TRUE, sep = "\t")
+xlRaw
+```
+
+
+```{r}
+xlRaw2 <- xlRaw %>%
+  dplyr::select(species, decimalLongitude, decimalLatitude, countryCode, individualCount,
+         gbifID, family, taxonRank, coordinateUncertaintyInMeters, year,
+         basisOfRecord, institutionCode, datasetName, gbifID)
+xlRaw2 <- xlRaw2%>%
+  filter(!is.na(decimalLongitude))%>%
+  filter(!is.na(decimalLatitude))
+xlRaw2
+count(xlRaw2)
+wm <- borders("world", colour="gray50", fill="gray50")
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw2, aes(x = decimalLongitude, y = decimalLatitude),
+             colour = "darkred", size = 0.5)+
+  theme_bw()
+```
+
+# Cleaning Part 1: using functions of coordinateCleaner package
+
+The cleaning process involve two cleaning cycles -- Cycle 1 goes through parts 1 to 6, with the "cc_iucn" function not used; the output of Part 6 will then be used to create geospatial shapefiles of the species' native and invaded ranges, where necessarry; Once range shapefiels are created, the process is iterated from Parts 1 to 7.
+
+Before creating/modifieing range shapefiles, we first inspected the output of Part 6, and omitted records that are likely geographically erroneuous (only for species that we are familiar with, suuch as R. marina).
+
+Native range defined: the native range of the species was based on expert delimited ranges obtained from IUCN/ for species whose native range is in Europe, georefferenced species' range maps from Speybroek et al. (2016)/ or scientific literuture (e.g., recent review of biogeography of genus/species as the case of X. laevis).
+
+Invaded range defined: the invaded range of the species was defined through the following process: (1) information on areas (i.e., countries, states, or islands) where the species has successfully established an alien population was retrieved from IUCN, Capinha et al. (2017), IUCN, CABI species datasheets, Amphibiaweb, and Amphibians of the World Database by Frost (2019); (2) the output from cucle 1 (i.e., XXClean5.csv) were uploaded in qGIS as point shapefiles, and were buffered to 100km (~0.833333 degrees) radius (dissolved and clipped to world_map shapefile retrieved from GADM). A 100km radius was selected assuming that the species has locally spread ~100km (in all directions) in 5 years since its actual establishment (5 years is the average reporting delay in invasive alien species records). Notably, for most species, this modified invaded range does not compeltely represent the global invaded range of the species, as some records in parts of the species known invaded ranges were either not available or were of poor quality (and thereby flagged and omitted after series of filters; For species with low number of records (both raw data and cleaned data), we first visually inspected flagged records and subjectively assessed wether to omit or retain flagged records.
+
+```{r}
+xlRaw3 <- xlRaw2
+names(xlRaw3)[2:3] <- c("decimallongitude", "decimallatitude") #because the gbif datasets' headers for these are "decimalLongitude" and decimalLatitude" -- notice the capitals.
+xlRangeShp<-readOGR("./xl_manipulated_merged.shp")
+crs(xlRangeShp) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+xlRawFlag <- xlRaw3%>%
+    as_tibble() %>% 
+    mutate(dup = cc_dupl(., value = "flagged"),
+           zero = cc_zero(., value = "flagged"),
+           equal = cc_equ(., value = "flagged"),
+           val = cc_val(., value = "flagged"),
+           sea = cc_sea(., scale = 10, value = "flagged"),
+           capital = cc_cap(., buffer = 1000, value = "flagged"),
+           centroid = cc_cen(., buffer = 1000, value = "flagged"),
+           gbifhq = cc_gbif(., buffer = 1000, value = "flagged"),
+           NHinsti = cc_inst(., buffer = 1000, value = "flagged"),
+           range = cc_iucn(.,range = xlRangeShp, value = "flagged"))
+write.csv(xlRawFlag, "xlRawFlag.csv")
+```
+
+
+
+```{r}
+xlClean1 <- xlRawFlag %>% filter(dup == TRUE) %>%
+                        filter(zero == TRUE)%>%
+                        filter(equal == TRUE)%>%
+                        filter(val == TRUE)%>%
+                        filter(sea == TRUE)%>%
+                        filter(capital == TRUE)%>%
+                        filter(centroid == TRUE)%>%
+                        filter(gbifhq == TRUE)%>%
+                        filter(NHinsti == TRUE)%>%
+                        filter(range == TRUE)
+xlClean1 <- xlClean1[,1:13]
+count(xlClean1)
+```
+
+
+# Cleaning Part 2: temporal range
+
+The temporal range vary by species, and was based on the earliest record of an invasive population (i.e., established). Ideally (when modelling the ecological niche of species), the temporal range of the records (as response variables) should align with the temporal range of the environmental variables (as predictor variables; i.e., 1970 to 2000 for WorldClim V.2 bioclimatic variables and aridity index [altough derived from the bioclimatic variables as well]). However, limiting the temporal range most often result to omission of a considerable portion of high-quality (post-cleaning) records, especially that many historical records were not re-evaluated more recently and that most records were recorded only recently (with tha rise of technology and citizen science initiatives). Narrowing occurrence records' temporal range will result  to a  considerable loss of data, and thereby, inevitably result to models that poorly characterize the species ecological niche, with limited use for risk assessments.
+
+
+Tthe earliest validated record outside native range (and successfully established) was 1930 (US). #also removed NA
+
+```{r}
+hist(xlClean1$year , breaks = 20)
+xlClean2 <- xlClean1 %>%
+  filter(year >= 1930)
+hist(xlClean2$year, breaks =20)
+count(xlClean2)
+```
+
+# Cleaning Part 3: Coordinate Uncertainty
+
+To minimize geographic uncertainty in response variables, records with coordinate uncertainty of 5km or higher were omitted. A 5km threshold was selected so that the uncertainty of reponse variables was lower than the resolution of the predictor variabes (i.e., bioclimatic variables and aridity index).
+
+Also, a 5km threshold was observed to omit records derived from rasters (a case of rounding); notably, the function of coordinatesCleaner to detect datasets with issues on rounding has an unresolved bugs.
+
+
+```{r}
+hist(xlClean2$coordinateUncertaintyInMeters / 1000, breaks = 20)
+xlClean3 <- xlClean2 %>%
+  filter(coordinateUncertaintyInMeters / 1000 < 5  | is.na(coordinateUncertaintyInMeters))
+hist(xlClean3$coordinateUncertaintyInMeters / 1000, breaks = 20)
+count(xlClean3)
+```
+
+# Cleaning Part 4: basis of record
+
+To minimize uncertainty, only records that were recorded on the basis of human observation or with an associated preserved speciemn was retained (unless specified).
+
+```{r}
+table(xlClean3$basisOfRecord)
+xlClean4 <- filter(xlClean3, basisOfRecord == "HUMAN_OBSERVATION" | 
+                         basisOfRecord == "PRESERVED_SPECIMEN")
+count(xlClean4)
+```
+
+# Cleaning Part 5: taxonomy
+
+To further minimise taxonomic uncertainty, records with family data that is not the recognized family of the species (based on Frost 2019) were omitted.
+
+```{r}
+table(xlClean4$family)
+```
+
+# Cleaning Part 6: geographical uncertainty -- country
+
+to minimize geographical uncertainty, records that were recorded in countries not included in the known global invaded ranges of the species (based on Capinha et al. [2017], Kraus [2009], Amphibiaweb, IUCN, amphibians of the world database, and/or CABI) were omitted.
+
+```{r}
+table(xlClean4$countryCode)
+xlClean5 <- xlClean4%>%
+  filter(countryCode != "AO" 
+         & countryCode != "BE"
+         & countryCode != "BJ"
+         & countryCode != "CD"
+         & countryCode != "CF"
+         & countryCode != "CG"
+         & countryCode != "CM"
+         & countryCode != "ES"
+         & countryCode != "ET"
+         & countryCode != "GQ"
+         & countryCode != "KE"
+         & countryCode != "KR"
+         & countryCode != "LR"
+         & countryCode != "NG"
+         & countryCode != "RW"
+         & countryCode != "SD"
+         & countryCode != "SN"
+         & countryCode != "TZ"
+         & countryCode != "UG"
+         & countryCode != "ZM"
+         & countryCode != "ZZ")
+table(xlClean5$countryCode)
+count(xlClean5)
+write.csv(xlClean5,"xlClean5.csv")
+```
+
+# Cleaning Part 7: aligning occurrence records with environmental variables
+
+Records that fall in pixels of the environmental variables with no data were omitted. This is so to avoid errors in subsequent analyses.
+
+See below environmental filtering for more inforamtion on the environmental variables used
+
+```{r}
+xlEnv <- list.files(path = "./xlEnv", pattern = "tif", full.names=TRUE)
+xlEnvStack <- stack(xlEnv)
+xlClean5Env <- raster::extract(xlEnvStack,xlClean5[,2:3])
+xlClean5Env <- cbind(xlClean5[,1:3], xlClean5Env)
+xlClean6 <- na.omit(xlClean5Env)
+xlClean6 <- xlClean6[,1:3]
+xlClean6
+count(xlClean6)
+write.csv(xlClean6,"xlClean6.csv")
+```
+
+# Visualizing raw data (black) vs. cleaned data (yellow) after each cleaning part.
+
+```{r, fig.height=10}
+wm <- borders("world", colour="gray50", fill="gray50")
+#general filter
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  geom_point(data = xlClean1, aes(x = decimallongitude, y = decimallatitude),
+             colour = "yellow", size = 0.5)+
+  theme_bw()
+#year filter
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  geom_point(data = xlClean2, aes(x = decimallongitude, y = decimallatitude),
+             colour = "yellow", size = 0.5)+
+  theme_bw()
+#coords uncertainty filter
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  geom_point(data = xlClean3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "yellow", size = 0.5)+
+  theme_bw()
+#basis of record
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  geom_point(data = xlClean4, aes(x = decimallongitude, y = decimallatitude),
+             colour = "yellow", size = 0.5)+
+  theme_bw()
+#country
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  geom_point(data = xlClean5, aes(x = decimallongitude, y = decimallatitude),
+             colour = "yellow", size = 0.5)+
+  theme_bw()
+#environment
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  geom_point(data = xlClean6, aes(x = decimallongitude, y = decimallatitude),
+             colour = "yellow", size = 0.5)+
+  theme_bw()
+```
+
+
+# Environmental filtering (aka Enmvironmental thinning) -- thinning environmental variables in environmental space
+
+
+As per Petitpierre et al. (2017), optimal environmental variables are those that are State-of-the-Art for the study taxa(a), PCA transformed(b), with maximum analogues in different ranges (c), or a combination of a-c, or b-c; b is not advicable when projecting to another space and time. I chose to use most commonly used environmental variables for amphibian ENMs (b).
+
+We provided a paragraph justifying our selection of environmetnal variables.
+
+environmental variables (i.e., predictor variables)
+* Bio 5 -- maxmimum tempearture of warmest month;
+* Bio 6 -- Minimum temperature of coldest month;
+* Bio 15 -- Precipitation seasonality;
+* Bio 16 -- Precipitation of wettest quarter;
+* Bio 18 -- Precipitation of driest quarter;
+
+Potential Evapotranspiration during the driest quarter -- proxy for drought/aridity;
+
+
+the process of environmental fitlering was as follows: (1)occurrence records were plotted in environmental space, defined by the values of the first two Principal Components that togethher explain >66% of variance in data (this is better than defining the environmental space using untransformed environmental variables); (2) the environmnetal space was gridded into a 50 X 50 grid; (3) for each grid, one record was randomly selected among records inside the bin, using envSample() function developed by Varela et al. (2014). This is similar to the gridsample() function of dismo, except in enviornmental space.
+
+thinnging in environmental space directly resolves issues in modeling ecological niches using geographically biased records. We also tried to thin records in geographical space using the spThin package, and in environmental space using a higher grid resolution (i.e., 100 x 100). Overall, models calibrated with environmentally thinned occurrence records at 50 X 50 grid resolution were less overfit to a particular part of the species global range (typically, models are overfit in the native range or invaded range with extensive records, poorly predicting climatically suitable areas in other parts of its range [where records are disproportionately less]).
+
+```{r}
+xlClean6_coords <- xlClean6[,2:3]
+xlEnv <- list.files(path = "./xlEnv", pattern = "tif", full.names=TRUE)
+xlEnvStack <- stack(xlEnv)
+xlThinEnv_in <- raster::extract(xlEnvStack,xlClean6_coords)
+xlThinEnv_in <- cbind(xlClean6_coords, xlThinEnv_in)
+xlThinEnv_in <- na.omit(xlThinEnv_in)
+xlThinEnv_coords <- xlThinEnv_in[,1:2]
+names(xlThinEnv_coords)[1:2] <- c("lon", "lat")
+xlThinEnv_pca <- dudi.pca(xlThinEnv_in[,3:9], nf = 7)
+xlThinEnv_li <- xlThinEnv_pca$li
+xlThinEnv <- envSample(coord = xlThinEnv_coords, filters = list(xlThinEnv_li$Axis1, xlThinEnv_li$Axis2), res=list(sum(abs(range(xlThinEnv_li$Axis1)))/50, sum(abs(range(xlThinEnv_li$Axis2)))/50), do.plot = TRUE)
+write.csv(xlThinEnv, "xlThinEnv.csv")
+names(xlThinEnv)[1:2] <- c("decimallongitude","decimallatitude")
+xlThinEnv <- xlThinEnv[,1:2]
+xlThinEnv <- xlThinEnv %>% mutate(species = "Xenopus laevis") %>% select (c(species, decimallongitude,decimallatitude))
+count(xlThinEnv)
+xlThinEnv_env <- raster::extract(xlEnvStack,xlThinEnv[,2:3])
+xlThinEnv <- cbind(xlThinEnv[,1:3], xlThinEnv_env) %>% na.omit(xlClean6Env) %>% select (c(species, decimallongitude,decimallatitude))
+```
+
+
+# visualizing raw (black) vs environmentally thinned records
+
+```{r}
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlRaw3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  geom_point(data = xlThinEnv, aes(x = decimallongitude, y = decimallatitude),
+             colour = "yellow", size = 0.5)+
+  theme_bw()
+```
+
+# Testing for spatialautocorrelation
+
+Although our scheme in selecting environmental variables were based on a "state-of-the-art" aprpoach (not accounting for correlation among enviornmental variables), we also inspected for spatial autocorrelation among environmental variables, using the classical Pearson's correaltion coefficient test and using a mantel R correlogram
+
+Pearson's correaltion was investigated in different parts of the species' geographic range' global range (i.e., geographically structures), delimited based on terrestrial realms as defined by Holt et al. (2012)
+
+To demonstrate how records were geographically structured
+
+```{r}
+xlThinEnv_outshp <- xlThinEnv
+coordinates(xlThinEnv_outshp) <- ~decimallongitude+decimallatitude
+xlEnv <- list.files(path = "./xlEnv", pattern = "tif", full.names=TRUE)
+xlEnvStack <- stack(xlEnv)
+#xlTHinEnv_cor1 = Native
+xlRange_nat <- readOGR(dsn = "./xlRangesEval/native.shp")
+crs(xlThinEnv_outshp) <- crs(xlRange_nat)
+xlThinEnv_cor1 <- over(xlThinEnv_outshp, xlRange_nat)
+xlThinEnv_cor1 <- cbind(xlThinEnv, xlThinEnv_cor1[,2])
+xlThinEnv_cor1 <- xlThinEnv_cor1 %>% na.omit() %>% select(species, decimallongitude, decimallatitude)
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlThinEnv_cor1, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  theme_bw()
+#xlThinEnv_cor2 = invasive range Nearctic
+xlRange_invNear <- readOGR(dsn = "./realms/nearctic.shp")
+xlThinEnv_cor2 <- over(xlThinEnv_outshp, xlRange_invNear)
+xlThinEnv_cor2 <- cbind(xlThinEnv, xlThinEnv_cor2[,2])
+xlThinEnv_cor2  <- xlThinEnv_cor2 %>% na.omit() %>% select(species, decimallongitude, decimallatitude)
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlThinEnv_cor2, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  theme_bw()
+#xlThinEnv_cor3 = neotropical
+xlRange_invNeo <- readOGR(dsn = "./realms/neotropical.shp")
+xlThinEnv_cor3 <- over(xlThinEnv_outshp, xlRange_invNeo)
+xlThinEnv_cor3 <- cbind(xlThinEnv, xlThinEnv_cor3[,2])
+xlThinEnv_cor3 <- xlThinEnv_cor3 %>% na.omit() %>% select(species, decimallongitude, decimallatitude)
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlThinEnv_cor3, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  theme_bw()
+#xlThinEnv_cor4 = palearctic
+xlRange_invPal <- readOGR(dsn = "./realms/palearctic.shp")
+xlThinEnv_cor4 <- over(xlThinEnv_outshp, xlRange_invPal)
+xlThinEnv_cor4 <- cbind(xlThinEnv, xlThinEnv_cor4[,2])
+xlThinEnv_cor4 <- xlThinEnv_cor4 %>% na.omit() %>% select(species, decimallongitude, decimallatitude)
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlThinEnv_cor4, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  theme_bw()
+```
+
+
+```{r, fig.width=8, fig.height=8}
+#all points
+xlThinEnv_outEnv <- raster::extract(xlEnvStack,xlThinEnv[,2:3]) %>% na.omit(xlThinEnv_outEnv)
+ecospat.cor.plot(xlThinEnv_outEnv)
+#xlThinEnv_cor1 = native
+xlThinEnv_cor1Env <- raster::extract(xlEnvStack,xlThinEnv_cor1[,2:3])%>% na.omit(xlThinEnv_cor1Env)
+ecospat.cor.plot(xlThinEnv_cor1Env)
+#xlThinEnv_cor2 = nearctic
+xlThinEnv_cor2Env <- raster::extract(xlEnvStack,xlThinEnv_cor2[,2:3]) %>% na.omit(xlThinEnv_cor2Env)
+ecospat.cor.plot(xlThinEnv_cor2Env)
+#xlThinEnv_cor3 = neotropical
+xlThinEnv_cor3Env <- raster::extract(xlEnvStack,xlThinEnv_cor3[,2:3])%>% na.omit(xlThinEnv_cor3Env)
+ecospat.cor.plot(xlThinEnv_cor3Env)
+#xlThinEnv_cor4 = palearctic
+xlThinEnv_cor4Env <- raster::extract(xlEnvStack,xlThinEnv_cor4[,2:3])%>% na.omit(xlThinEnv_cor4Env)
+ecospat.cor.plot(xlThinEnv_cor4Env)
+```
+
+# Mantel r correlogram
+
+spatial autocorrelation is minimal at around 500m; open cirlces indicate that spatial autocorrelation is not significantly different than zero; this is good since the resolution of our predictor variables is 5km (~2.5arcmin at equator).
+```{r}
+xlThinEnv_outEnv_correlogram <- cbind(xlThinEnv[,2:3], xlThinEnv_outEnv)
+ecospat.mantel.correlogram(dfvar = xlThinEnv_outEnv_correlogram, colxy = 1:2, n = 100, colvar = 3:9, max = 1000, nclass = 10, nperm = 100)
+```
+
+# Defining the modelling domain
+
+The modelling domain was defined as the terrestrial ecoregions (not realms; defined by Olson et al. 2001) that intersect species ranges. This is based on the recommendations of Guisan et al. (2014) for modelling the ecological niche of invasive alien species.
+
+Since we opted to use only the maxent algorithm (due to robustness of algorithm and recent developments in model fine tuning), we used a random sampling method in sampling 10,000 background points. For Maxent, this method and sample size of background samples is found to be optimal (Barbet-Masin et al. 2012).
+
+```{r}
+xlThinEnv_bg <- randomPoints(xlEnvStack[[1]], 10000)
+xlThinEnv_bg <- as.data.frame(xlThinEnv_bg)
+names(xlThinEnv_bg)[1:2] <- c("decimallongitude", "decimallatitude")
+ggplot()+ coord_fixed()+ wm +
+  geom_point(data = xlThinEnv_bg, aes(x = decimallongitude, y = decimallatitude),
+             colour = "black", size = 0.5)+
+  theme_bw()
+```
+
+# Fine tuning: identifying parameters that will result to optimal models (relative to alternative parameters)
+
+We used the ENMeval package to identify the parameters that will results to optimal maxent models.
+
+For maxent, parameters tested were the feature classes used (fc) and the regularization multiplier (RM).
+
+Alternative models (modelled using different parameterization settings) were compared based on their deltaAIC values, where a value of zero is statistically presumed to be the "optimal" model.
+#we also inspected the overfitting in "optimal models" based on diffAUC and omission rates, and whether it aligns with principle of parsimony (low number of variables used).
+
+Model performance was evaluated using an internal k-fold cross-validation method (where proportion of the records [training dataset] were used for model training and the remaining records [testing dataset] were used for  model testing) and evaluation scores were derived from the average scores of five runs (testing datasets). 
+
+Following the concept of k-fold cross-validation, (1) occcurrence and background records/data were resampled into four bins (K), using a geographically stratified sampling method "checkerboard2"; (2) for four model runs, models were trained using K-1 subsamples, with the excluded subsample used for testing; (3) the fifth run used all records for both training and testing.
+
+This method of internal cross-validation -- geographically structured/quasi-independent evaluation, is found to be more robust than a random split-sampling method; notably, a geographically/temporally indipendent dataset (not used in model training) is the most robust method (which is rarely available).
+
+
+```{r}
+xlThinEnv_enm <- ENMevaluate(occ = xlThinEnv[,2:3], env = xlEnvStack, bg.coords = xlThinEnv_bg, method='checkerboard2', RMvalues=c(1,1.5,2,2.5,3), fc=c('L','LQ','LQP', 'LQHP'), algorithm='maxent.jar', rasterPreds = TRUE, parallel = TRUE, numCores = 7)
+
+xlThinEnv_enm
+```
+
+# Evaluation of performance of alternative models
+
+```{r}
+xlThinEnv_enm@results
+```
+
+
+```{r, echo = FALSE}
+ENMeval::eval.plot(xlThinEnv_enm@results)
+ENMeval::eval.plot(xlThinEnv_enm@results, 'avg.test.AUC', var='var.test.AUC')
+ENMeval::eval.plot(xlThinEnv_enm@results, 'avg.diff.AUC', var='var.diff.AUC')
+ENMeval::eval.plot(xlThinEnv_enm@results, 'avg.test.orMTP', var='var.test.orMTP')
+ENMeval::eval.plot(xlThinEnv_enm@results, 'avg.test.or10pct', var='var.test.or10pct')
+```
+
+# Isolating the best model based on delta.AICc
+
+```{r}
+xlThinEnv_enm@results[c(3,6,4),c(1,2,3,5,7,9,11,13)]
+write.csv(xlThinEnv_enm@results[c(3,6,4),c(1,2,3,5,7,9,11,13)], "xlThinEnv_ENMeval_results.csv")
+```
+
+```{r}
+xlThinEnv_enm_overlap <- calc.niche.overlap(xlThinEnv_enm@predictions[[c(3,6,4)]], stat='D')
+xlThinEnv_enm_overlap
+```
+
+# Visualizing projection
+
+A limitation of ENMeval is that it only produces projections in raw format, and can only project to calibration environment.
+
+```{r, fig.height=10}
+plot(xlThinEnv_enm@predictions[[3]], main="Relative occurrence rate")
+```
+
+# Variable importance
+
+```{r}
+xlThinEnv_enm3 <- xlThinEnv_enm@models[[3]]
+xlThinEnv_enm3_vi <- var.importance(xlThinEnv_enm3)
+barplot(xlThinEnv_enm3_vi$permutation.importance, names.arg=xlThinEnv_enm3_vi$variable, las=2, ylab="Pexlutation Importance")
+```
+
+
+Notably, the response curves can be visualized in different ways; as shown further down
+
+
+```{r}
+response(xlThinEnv_enm@models[[3]])
+response(xlThinEnv_enm@models[[6]])
+response(xlThinEnv_enm@models[[7]])
+response(xlThinEnv_enm@models[[11]])
+response(xlThinEnv_enm@models[[15]])
+```
+
+# Modelling using biomod2 package
+
+Having identified the parameter setting that will result to the (statistically) optimal models, we then run ecolgical niche models using the biomod2 package;
+
+This is necessary, given the limitations of enmEval package as discussed above.
+
+Here, optimal model was re-run AS.IS. i.e., the exact records (and k-fold partitions) used in enmEval were used, and the parameterization settings of the identified optimal models were used. Hereforth, we assume that models run using the enmeval and biomod2 package, if calibrated with exactly the same data and parameters, is identical.
+
+
+```{r}
+xlThinEnv_bg <- xlThinEnv_enm@bg.pts
+xlThinEnv_bgbin <- xlThinEnv_enm@bg.grp
+as.data.frame(xlThinEnv_bgbin)
+xlThinEnv_biomodDatabg <- cbind(xlThinEnv_bg, xlThinEnv_bgbin)
+names(xlThinEnv_biomodDatabg)[1:3] <- c("lon", "lat", "bin")
+xlThinEnv_biomodDatabg <- xlThinEnv_biomodDatabg %>% mutate (xl = 0)
+xlThinEnv_biomodDatabg <- xlThinEnv_biomodDatabg %>% mutate (RUN1 = ifelse(bin != "1", "TRUE", "FALSE")) %>%
+                                                    mutate (RUN2 = ifelse(bin != "2", "TRUE", "FALSE")) %>% 
+                                                    mutate (RUN3 = ifelse(bin != "3", "TRUE", "FALSE")) %>% 
+                                                    mutate (RUN4 = ifelse(bin != "4", "TRUE", "FALSE")) %>% 
+                                                    mutate (full = TRUE)
+xlThinEnv_occ <- xlThinEnv_enm@occ.pts
+xlThinEnv_occbin <- xlThinEnv_enm@occ.grp
+as.data.frame(xlThinEnv_occbin)
+xlThinEnv_biomodData <- cbind(xlThinEnv_occ, xlThinEnv_occbin)
+names(xlThinEnv_biomodData)[1:3] <- c("lon", "lat", "bin")
+xlThinEnv_biomodData <- xlThinEnv_biomodData %>% mutate (xl = 1)
+xlThinEnv_biomodData <- xlThinEnv_biomodData %>% mutate (RUN1 = ifelse(bin != "1", "TRUE", "FALSE")) %>%
+                                                    mutate (RUN2 = ifelse(bin != "2", "TRUE", "FALSE")) %>% 
+                                                    mutate (RUN3 = ifelse(bin != "3", "TRUE", "FALSE")) %>% 
+                                                    mutate (RUN4 = ifelse(bin != "4", "TRUE", "FALSE")) %>% 
+                                                    mutate (full = TRUE)
+xlThinEnv_biomodData <- rbind(xlThinEnv_biomodData, xlThinEnv_biomodDatabg)
+write.csv(xlThinEnv_biomodData,"xlThinEnv_biomodData.csv")
+xlThinEnv_biomodDataSplitTable <- xlThinEnv_biomodData %>% select (c(RUN1, RUN2, RUN3, RUN4, full)) %>% mutate(RUN1 = as.logical(RUN1),
+                                                                                                               RUN2 = as.logical(RUN2),
+                                                                                                               RUN3 = as.logical(RUN3),
+                                                                                                               RUN4 = as.logical(RUN4))
+xlThinEnv_biomodDataSplitTable <- as.matrix(xlThinEnv_biomodDataSplitTable)
+xlThinEnv_biomodresp <- as.numeric(xlThinEnv_biomodData[,"xl"])
+xlThinEnv_biomodxy <- xlThinEnv_biomodData %>% select (c(lon,lat))
+xl <- "xl"
+xlThinEnv_biomod_fordata <- BIOMOD_FormatingData(resp.var = xlThinEnv_biomodresp, expl.var = xlEnvStack, resp.xy = xlThinEnv_biomodxy, resp.name = xl, na.rm = TRUE)
+
+```
+
+
+```{r}
+xlThinEnv_biomod_fordata
+plot(xlThinEnv_biomod_fordata)
+```
+
+
+```{r}
+xlThinEnv_biomod_modOp3 <- BIOMOD_ModelingOptions(MAXENT.Phillips = list(path_to_maxent.jar = 'C:/Users/Public/maxent.jar', linear = TRUE, quadratic = TRUE, product = TRUE, betamultiplier = 1))
+xlThinEnv_biomod_model3<- BIOMOD_Modeling(data = xlThinEnv_biomod_fordata,
+                                           models = c("MAXENT.Phillips"),
+                                           models.options = xlThinEnv_biomod_modOp3,
+                                           VarImport = 7,
+                                           Prevalence = 0.5,
+                                           models.eval.meth = c("TSS", "ROC"),
+                                           SaveObj = TRUE,
+                                           modeling.id = "xlThinEnv_biomod_model3",
+                                           DataSplitTable = xlThinEnv_biomodDataSplitTable)
+
+```
+# evaluation scores each run
+
+Internal cross-validation method
+
+See geographically structured evaluation below
+```{r}
+xlThinEnv_biomod_model3eval <- get_evaluations(xlThinEnv_biomod_model3)
+xlThinEnv_biomod_model3eval
+```
+
+```{r}
+xlThinEnv_biomod_eval_roc <- as.data.frame.table(xlThinEnv_biomod_model3eval) %>% filter(Var1 == "ROC" & Var2 == "Testing.data") %>% select (Var1, Var4, Freq)
+xlThinEnv_biomod_eval_tss <- as.data.frame.table(xlThinEnv_biomod_model3eval) %>% filter(Var1 == "TSS" & Var2 == "Testing.data") %>% select (Var1, Var4, Freq)
+list(roc = mean(xlThinEnv_biomod_eval_roc[,3]), tss = mean(xlThinEnv_biomod_eval_tss[,3])) %>% write.csv("xlThinEnv_biomod_eval.csv")
+```
+
+
+# Variable importance
+
+```{r}
+xlThinEnv_biomod_model3vi <- get_variables_importance(xlThinEnv_biomod_model3)
+xlThinEnv_biomod_model3vi
+```
+
+# response curves
+
+This was created using the evaluation strp method by Elith et al. (2005); different from the method used in enmEval package.
+
+```{r, fig.height=10}
+xlThinEnv_biomod_model3models <- BIOMOD_LoadModels(xlThinEnv_biomod_model3, models = "MAXENT.Phillips")
+xlThinEnv_biomod_model3resp <- response.plot2(models = xlThinEnv_biomod_model3models,
+                                              Data = get_formal_data(xlThinEnv_biomod_model3, "expl.var"),
+                                              show.variables = get_formal_data (xlThinEnv_biomod_model3, "expl.var.names"),
+                                              do.bivariate = FALSE,
+                                              fixed.var.metric = "mean",
+                                              col = rand_color(5, luminosity = "random"),
+                                              legend = TRUE,
+                                              data_species = get_formal_data(xlThinEnv_biomod_model3, "resp.var"))
+```
+
+
+# Averaging the 5 runs
+
+```{r}
+xlThinEnv_biomod_model3ens <- BIOMOD_EnsembleModeling(modeling.output = xlThinEnv_biomod_model3,
+                                                      chosen.models = "all",
+                                                      em.by = "all",
+                                                      eval.metric = c("TSS"),
+                                                      models.eval.meth = c("TSS", "ROC"),
+                                                      prob.mean = TRUE,
+                                                      prob.cv = FALSE,
+                                                      prob.ci = FALSE,
+                                                      prob.median = FALSE,
+                                                      committee.averaging = FALSE,
+                                                      prob.mean.weight = FALSE,
+                                                      VarImport = 7)
+
+```
+
+# Mean evaluation scores across runs
+
+```{r}
+xlThinEnv_biomod_model3enseval <- get_evaluations(xlThinEnv_biomod_model3ens)
+xlThinEnv_biomod_model3enseval
+```
+
+# Projecting runs to geographical space (modelling domain)
+
+```{r}
+xlThinEnv_biomod_proj3 <- BIOMOD_Projection(modeling.output = xlThinEnv_biomod_model3,
+                                            new.env = xlEnvStack,
+                                            proj.name = "xlThinEnv_biomod_model3",
+                                            selected.models = "all",
+                                            compress = "xz",
+                                            clamping.mask = TRUE,
+                                            output.foxlat = ".grd")
+```
+
+```{r, fig.height=10}
+xlThinEnv_biomod_proj3_pred <- get_predictions(xlThinEnv_biomod_proj3)
+plot(xlThinEnv_biomod_proj3_pred[[5]])
+```
+
+
+
+# Projecting models to global geographical space
+
+```{r}
+setwd("C:/Users/Arman N. Pili/Desktop/enmPhD")
+globalEnv <- list.files(path = "./global", pattern = "tif", full.names=TRUE)
+globalEnvStack <- stack(globalEnv)
+xlThinEnv_biomod_model3_projglobal <- BIOMOD_Projection(modeling.output = xlThinEnv_biomod_model3,
+                                            new.env = globalEnvStack,
+                                            proj.name = "xlThinEnv_biomod_model3_projglobal",
+                                            selected.models = "all",
+                                            compress = "xz",
+                                            clamping.mask = TRUE,
+                                            output.foxlat = ".grd")
+```
+
+
+```{r, fig.height=10}
+xlThinEnv_biomod_model3_projglobal_pred <- get_predictions(xlThinEnv_biomod_model3_projglobal)
+plot(xlThinEnv_biomod_model3_projglobal_pred[[5]])
+writeRaster(xlThinEnv_biomod_model3_projglobal_pred[[5]], "xlThinEnv_biomod_model3_projglobal_pred.tif",foxlat = "GTiff", overwrite = T)
+```
+
+
+# Variable clamping
+
+Notably, we should be warry of predictions in areas with non-analogous environments to our modeling domain. Ideally, predictions in these regions should be masked (not done here). Shown below are global areas with non-analogous environments to the modelling domain (scale indicates the number of variables that are non-analogous)
+
+```{r, fig.height=10}
+xlThinEnv_biomod_model3_globalpred_clamp <- raster("./xl/proj_xlThinEnv_biomod_model3_projglobal/proj_xlThinEnv_biomod_model3_projglobal_ClampingMask.grd")
+plot(xlThinEnv_biomod_model3_globalpred_clamp)
+writeRaster(xlThinEnv_biomod_model3_globalpred_clamp, "xlThinEnv_biomod_model3_globalpred_clamp.tif",foxlat = "GTiff", overwrite = T)
+```
+
+
+```{r, fig.height=10}
+xlThinEnv_biomod_model3_globalpred_masked <- mask(x = xlThinEnv_biomod_model3_projglobal_pred[[5]], mask = xlThinEnv_biomod_model3_globalpred_clamp, maskvalue = 0, inverse = TRUE)
+plot(xlThinEnv_biomod_model3_globalpred_masked)
+writeRaster(xlThinEnv_biomod_model3_globalpred_masked, filename = "xlThinEnv_biomod_model3_globalpred_masked.tiff", fopbat = "GTiff", overwrite = T)
+```
+
+
+```{r, fig.height=10}
+setwd("C:/Users/Arman N. Pili/Desktop/enmPhD")
+wrld50 <- readOGR("wrld50/wrld50.shp")
+xlThinEnv_shp <- xlThinEnv
+coordinates(xlThinEnv_shp) <- ~decimallongitude + decimallatitude
+crs(xlThinEnv_shp) <- crs(wrld50)
+tm_shape(wrld50) +
+  tm_fill(col = "gray") +
+  tm_grid(col = "#D9D9D9", alpha = 0.8, labels.format = list(scientific = TRUE, format = "g"))+
+tm_shape(xlThinEnv_biomod_model3_globalpred_masked)+
+  tm_raster(n=10, palette = brewer.pal(n = 9, "YlOrRd"), title = "Probability of Climate Suitability") +
+  tm_layout(legend.position = c("left", "center"))+
+tm_shape(wrld50) +
+  tm_borders() +
+tm_shape(xlThinEnv_shp) +
+  tm_dots()
+```
+```{r}
+xlThinEnv_model_indpeval_occ <- xlThinEnv_occ %>% mutate(xl = 1) %>% select(c(xl, LON, LAT))
+xlThinEnv_model_indpeval_occenv <- raster::extract(xlEnvStack,xlThinEnv_model_indpeval_occ[,2:3])
+xlThinEnv_model_indpeval_occ <- cbind (xlThinEnv_model_indpeval_occ, xlThinEnv_model_indpeval_occenv)
+xlThinEnv_model_indpeval_bg <- xlThinEnv_bg %>% mutate(xl = 0)%>% select(c(xl, LON, LAT))
+xlThinEnv_model_indpeval_bgenv <- raster::extract(xlEnvStack,xlThinEnv_model_indpeval_bg[,2:3])
+xlThinEnv_model_indpeval_bg <- cbind(xlThinEnv_model_indpeval_bg, xlThinEnv_model_indpeval_bgenv)
+xlThinEnv_model_indpeval_data <- rbind(xlThinEnv_model_indpeval_occ, xlThinEnv_model_indpeval_bg)
+xlThinEnv_model_indpeval_shp <- xlThinEnv_model_indpeval_data
+coordinates(xlThinEnv_model_indpeval_shp) <- ~LON+LAT
+#xlTHinEnv_eval1 = native range
+crs(xlThinEnv_model_indpeval_shp) <- crs(xlRange_nat)
+xlThinEnv_eval1 <- over(xlThinEnv_model_indpeval_shp, xlRange_nat)
+xlThinEnv_eval1 <- cbind(xlThinEnv_model_indpeval_data, xlThinEnv_eval1)
+xlThinEnv_eval1 <- xlThinEnv_eval1[which(!is.na(xlThinEnv_eval1$fid)),1:10]  %>% na.omit() %>% select(c(xl, ai, bio4, bio5, bio6, bio15, bio16, bio17))
+#xlThinEnv_eval2 = Nearctic
+xlThinEnv_eval2 <- over(xlThinEnv_model_indpeval_shp, xlRange_invNear)
+xlThinEnv_eval2 <- cbind(xlThinEnv_model_indpeval_data, xlThinEnv_eval2)
+xlThinEnv_eval2 <- xlThinEnv_eval2 %>% na.omit() %>% select(c(xl, ai, bio4, bio5, bio6, bio15, bio16, bio17))
+#xlThinEnv_eval3 = neotropical
+xlThinEnv_eval3 <- over(xlThinEnv_model_indpeval_shp, xlRange_invNeo)
+xlThinEnv_eval3 <- cbind(xlThinEnv_model_indpeval_data, xlThinEnv_eval3)
+xlThinEnv_eval3 <- xlThinEnv_eval3  %>% na.omit()  %>% select(c(xl, ai, bio4, bio5, bio6, bio15, bio16, bio17))
+#xlThinEnv_eval4 = invasive range palearctic
+xlThinEnv_eval4 <- over(xlThinEnv_model_indpeval_shp, xlRange_invPal)
+xlThinEnv_eval4 <- cbind(xlThinEnv_model_indpeval_data, xlThinEnv_eval4)
+xlThinEnv_eval4 <- xlThinEnv_eval4  %>% na.omit()  %>% select(c(xl, ai, bio4, bio5, bio6, bio15, bio16, bio17))
+#xlTHinEnv_evalG = globalRange
+xlThinEnv_evalG <- xlThinEnv_model_indpeval_data  %>% na.omit() %>% select(c(xl, ai, bio4, bio5, bio6, bio15, bio16, bio17))
+
+```
+
+# quasi-independent evaluation
+
+Since me modelled species' ecological niche using the data across its global range, a totally geographically independent dataset for independent evaluation is not possible. Nonetheless, to evaluate model overfitting to particular parts of its range, we evaluated the averaged model's performance in different parts of its global range, using evaluation datasets that are geographically structured into terrestrial realms.
+
+
+```{r}
+#native range
+xlThinEnv_biomod_model3_indeval1 <- evaluate(xlThinEnv_biomod_model3, data = xlThinEnv_eval1, stat = c("ROC", "TSS"))
+#nearctic
+xlThinEnv_biomod_model3_indeval2 <- evaluate(xlThinEnv_biomod_model3, data = xlThinEnv_eval2, stat = c("ROC", "TSS"))
+#neotropical
+xlThinEnv_biomod_model3_indeval3 <- evaluate(xlThinEnv_biomod_model3, data = xlThinEnv_eval3, stat = c("ROC", "TSS"))
+#palearctic
+xlThinEnv_biomod_model3_indeval4 <- evaluate(xlThinEnv_biomod_model3, data = xlThinEnv_eval4, stat = c("ROC", "TSS"))
+#global
+xlThinEnv_biomod_model3_indevalG <- evaluate(xlThinEnv_biomod_model3, data = xlThinEnv_evalG, stat = c("ROC", "TSS"))
+xlThinEnv_biomod_model3_indeval <- list(native = xlThinEnv_biomod_model3_indeval1$xl_AllData_RUN5_MAXENT.Phillips,
+                                        nearctic = xlThinEnv_biomod_model3_indeval2$xl_AllData_RUN5_MAXENT.Phillips,
+                                        neotropical = xlThinEnv_biomod_model3_indeval3$xl_AllData_RUN5_MAXENT.Phillips, 
+                                        palearctic = xlThinEnv_biomod_model3_indeval4$xl_AllData_RUN5_MAXENT.Phillips, 
+                                        global = xlThinEnv_biomod_model3_indevalG$xl_AllData_RUN5_MAXENT.Phillips)
+xlThinEnv_biomod_model3_indeval 
+```
+
+
+
+# Evaluation using Sensitivity and Boyce Index
+
+It has been suggested that, for invasive alien species, evaluation metrics based on the model's ability to correclty predict occurrences (true positives), rather than based on its ability to correctly predict both occurrence and background (true negatives), is ideal.
+
+This is because most species has not reached environmental equilibrium in its invaded ranges.
+
+Here, we further evaluated the model's performance using the sensitivity and boyce index.
+
+For sensitivity (percentage of true positives), the threshold level was defined based on the threshold that maximizes TSS in the native range of the species. This is because it is assumed that the species is in state of environmental equilibrium in the native range (see Petitpierre et al. 2017)
+
+# computing for maximum TSS in native range
+
+```{r}
+xlThinEnv_ecospat_tss_data <- raster::extract(xlThinEnv_biomod_model3_projglobal_pred[[5]],xlThinEnv_model_indpeval_data[,2:3])
+xlThinEnv_ecospat_tss_data <- cbind(xlThinEnv_ecospat_tss_data, xlThinEnv_model_indpeval_data[,1:3])
+xlThinEnv_ecospat_tss_datacoor <- xlThinEnv_ecospat_tss_data
+coordinates(xlThinEnv_ecospat_tss_datacoor) <- ~LON+LAT
+crs(xlThinEnv_ecospat_tss_datacoor) <- crs(xlRange_nat)
+xlThinEnv_ecospat_tss_dataNat <- over(xlThinEnv_ecospat_tss_datacoor, xlRange_nat[,1])
+xlThinEnv_ecospat_tss_dataNat <- cbind(xlThinEnv_ecospat_tss_data, xlThinEnv_ecospat_tss_dataNat)
+xlThinEnv_ecospat_tss_pred <- xlThinEnv_ecospat_tss_dataNat %>% na.omit() %>% select(c(xlThinEnv_ecospat_tss_data))
+xlThinEnv_ecospat_tss_pred <- xlThinEnv_ecospat_tss_pred[,1]
+xlThinEnv_ecospat_tss_pred <- xlThinEnv_ecospat_tss_pred/1000
+xlThinEnv_ecospat_tss_spOcc <- xlThinEnv_ecospat_tss_dataNat %>% na.omit() %>% select(c(xl))
+xlThinEnv_ecospat_tss_spOcc <- xlThinEnv_ecospat_tss_spOcc[,1]
+xlThinEnv_ecospat_tss <- ecospat.max.tss(Pred = xlThinEnv_ecospat_tss_pred, Sp.occ = xlThinEnv_ecospat_tss_spOcc)
+xlThinEnv_ecospat_tss
+
+```
+
+
+
+```{r}
+#Nearcttic
+xlThinEnv_ecospat_meva_eval2_data <- over(xlThinEnv_ecospat_tss_datacoor, xlRange_invNear)
+xlThinEnv_ecospat_meva_eval2_data <- cbind(xlThinEnv_ecospat_tss_data, xlThinEnv_ecospat_meva_eval2_data)
+xlThinEnv_ecospat_meva_eval2_pred <- xlThinEnv_ecospat_meva_eval2_data %>% na.omit() %>% select(c(xlThinEnv_ecospat_tss_data))
+xlThinEnv_ecospat_meva_eval2_pred <- xlThinEnv_ecospat_meva_eval2_pred[,1]
+xlThinEnv_ecospat_meva_eval2_pred <- xlThinEnv_ecospat_meva_eval2_pred/1000
+xlThinEnv_ecospat_meva_eval2_spOcc <- xlThinEnv_ecospat_meva_eval2_data %>% na.omit() %>% select(c(xl))
+xlThinEnv_ecospat_meva_eval2_spOcc <- xlThinEnv_ecospat_meva_eval2_spOcc[,1]
+#Neotropical
+xlThinEnv_ecospat_meva_eval3_data <- over(xlThinEnv_ecospat_tss_datacoor, xlRange_invNeo)
+xlThinEnv_ecospat_meva_eval3_data <- cbind(xlThinEnv_ecospat_tss_data, xlThinEnv_ecospat_meva_eval3_data)
+xlThinEnv_ecospat_meva_eval3_pred <- xlThinEnv_ecospat_meva_eval3_data %>% na.omit() %>% select(c(xlThinEnv_ecospat_tss_data))
+xlThinEnv_ecospat_meva_eval3_pred <- xlThinEnv_ecospat_meva_eval3_pred[,1]
+xlThinEnv_ecospat_meva_eval3_pred <- xlThinEnv_ecospat_meva_eval3_pred/1000
+xlThinEnv_ecospat_meva_eval3_spOcc <- xlThinEnv_ecospat_meva_eval3_data %>% na.omit() %>% select(c(xl))
+xlThinEnv_ecospat_meva_eval3_spOcc <- xlThinEnv_ecospat_meva_eval3_spOcc[,1]
+#Palearctic
+xlThinEnv_ecospat_meva_eval4_data <- over(xlThinEnv_ecospat_tss_datacoor, xlRange_invPal)
+xlThinEnv_ecospat_meva_eval4_data <- cbind(xlThinEnv_ecospat_tss_data, xlThinEnv_ecospat_meva_eval4_data)
+xlThinEnv_ecospat_meva_eval4_pred <- xlThinEnv_ecospat_meva_eval4_data %>% na.omit() %>% select(c(xlThinEnv_ecospat_tss_data))
+xlThinEnv_ecospat_meva_eval4_pred <- xlThinEnv_ecospat_meva_eval4_pred[,1]
+xlThinEnv_ecospat_meva_eval4_pred <- xlThinEnv_ecospat_meva_eval4_pred/1000
+xlThinEnv_ecospat_meva_eval4_spOcc <- xlThinEnv_ecospat_meva_eval4_data %>% na.omit() %>% select(c(xl))
+xlThinEnv_ecospat_meva_eval4_spOcc <- xlThinEnv_ecospat_meva_eval4_spOcc[,1]
+#Global
+xlThinEnv_ecospat_meva_evalG_pred <- na.omit(xlThinEnv_ecospat_tss_data)
+xlThinEnv_ecospat_meva_evalG_pred <- xlThinEnv_ecospat_meva_evalG_pred[,1]/1000
+xlThinEnv_ecospat_meva_evalG_spOcc <- na.omit(xlThinEnv_ecospat_tss_data)
+xlThinEnv_ecospat_meva_evalG_spOcc <- xlThinEnv_ecospat_meva_evalG_spOcc[,2]
+```
+
+
+
+```{r}
+#native range
+xlThinEnv_ecospat_meva_eval1 <- ecospat.meva.table(Pred = xlThinEnv_ecospat_tss_pred, Sp.occ = xlThinEnv_ecospat_tss_spOcc, th = xlThinEnv_ecospat_tss$max.threshold)
+xlThinEnv_ecospat_meva_eval1
+xlThinEnv_ecospat_boyce_eval1obs <- xlThinEnv_ecospat_tss_pred[which(xlThinEnv_ecospat_tss_spOcc == 1)]
+xlThinEnv_ecospat_boyce_eval1 <- ecospat.boyce(fit = xlThinEnv_ecospat_tss_pred, obs = xlThinEnv_ecospat_boyce_eval1obs, nclass = 0, window.w = "default", res = 100, PEplot = TRUE)$Spearman.cor
+xlThinEnv_ecospat_boyce_eval1
+#invaded range Nearctic
+xlThinEnv_ecospat_meva_eval2 <- ecospat.meva.table(Pred = xlThinEnv_ecospat_meva_eval2_pred, Sp.occ = xlThinEnv_ecospat_meva_eval2_spOcc, th = xlThinEnv_ecospat_tss$max.threshold)
+xlThinEnv_ecospat_meva_eval2
+xlThinEnv_ecospat_boyce_eval2obs <- xlThinEnv_ecospat_meva_eval2_pred[which(xlThinEnv_ecospat_meva_eval2_spOcc == 1)]
+xlThinEnv_ecospat_boyce_eval2 <- ecospat.boyce(fit = xlThinEnv_ecospat_meva_eval2_pred, obs = xlThinEnv_ecospat_boyce_eval2obs, nclass = 0, window.w = "default", res = 100, PEplot = TRUE)$Spearman.cor
+xlThinEnv_ecospat_boyce_eval2
+#invaded range Neotropical
+xlThinEnv_ecospat_meva_eval3 <- ecospat.meva.table(Pred = xlThinEnv_ecospat_meva_eval3_pred, Sp.occ = xlThinEnv_ecospat_meva_eval3_spOcc, th = xlThinEnv_ecospat_tss$max.threshold)
+xlThinEnv_ecospat_meva_eval3
+xlThinEnv_ecospat_boyce_eval3obs <- xlThinEnv_ecospat_meva_eval3_pred[which(xlThinEnv_ecospat_meva_eval3_spOcc == 1)]
+xlThinEnv_ecospat_boyce_eval3 <- ecospat.boyce(fit = xlThinEnv_ecospat_meva_eval3_pred, obs = xlThinEnv_ecospat_boyce_eval3obs, nclass = 0, window.w = "default", res = 100, PEplot = TRUE)$Spearman.cor
+xlThinEnv_ecospat_boyce_eval3
+#invaded range Palearctic
+xlThinEnv_ecospat_meva_eval4 <- ecospat.meva.table(Pred = xlThinEnv_ecospat_meva_eval4_pred, Sp.occ = xlThinEnv_ecospat_meva_eval4_spOcc, th = xlThinEnv_ecospat_tss$max.threshold)
+xlThinEnv_ecospat_meva_eval4
+xlThinEnv_ecospat_boyce_eval4obs <- xlThinEnv_ecospat_meva_eval4_pred[which(xlThinEnv_ecospat_meva_eval4_spOcc == 1)]
+xlThinEnv_ecospat_boyce_eval4 <- ecospat.boyce(fit = xlThinEnv_ecospat_meva_eval4_pred, obs = xlThinEnv_ecospat_boyce_eval4obs, nclass = 0, window.w = "default", res = 100, PEplot = TRUE)$Spearman.cor
+xlThinEnv_ecospat_boyce_eval4
+#Global
+xlThinEnv_ecospat_meva_evalG <- ecospat.meva.table(Pred = xlThinEnv_ecospat_meva_evalG_pred, Sp.occ = xlThinEnv_ecospat_meva_evalG_spOcc, th = xlThinEnv_ecospat_tss$max.threshold)
+xlThinEnv_ecospat_meva_evalG
+xlThinEnv_ecospat_boyce_evalGobs <- xlThinEnv_ecospat_meva_evalG_pred[which(xlThinEnv_ecospat_meva_evalG_spOcc == 1)]
+xlThinEnv_ecospat_boyce_evalG <- ecospat.boyce(fit = xlThinEnv_ecospat_meva_evalG_pred, obs = xlThinEnv_ecospat_boyce_evalGobs, nclass = 0, window.w = "default", res = 100, PEplot = TRUE)$Spearman.cor
+xlThinEnv_ecospat_boyce_evalG
+```
+
+
+```{r}
+#exporting
+names(xlThinEnv_biomod_model3_indeval1)[1] <- "native"
+xlThinEnv_ecospat_meva_eval1_df <- as.data.frame(xlThinEnv_ecospat_meva_eval1$EVALUATION_METRICS)
+xlThinEnv_ecospat_meva_eval2_df <- as.data.frame(xlThinEnv_ecospat_meva_eval2$EVALUATION_METRICS)
+xlThinEnv_ecospat_meva_eval3_df <- as.data.frame(xlThinEnv_ecospat_meva_eval2$EVALUATION_METRICS)
+xlThinEnv_ecospat_meva_eval4_df <- as.data.frame(xlThinEnv_ecospat_meva_eval2$EVALUATION_METRICS)
+xlThinEnv_ecospat_eval <- cbind(xlThinEnv_ecospat_meva_eval1_df,
+                                xlThinEnv_ecospat_meva_eval2_df[,2],
+                                xlThinEnv_ecospat_meva_eval3_df[,2],
+                                xlThinEnv_ecospat_meva_eval4_df[,2])
+names(xlThinEnv_ecospat_eval)[1:5] <- c("metric", "native", "nearctic", "neotropical", "palearctic")
+xlThinEnv_ecospat_eval %>%
+  convert(num(native, nearctic, neotropical, palearctic)) %>%
+  add_row(metric = "Boyce Index", native = xlThinEnv_ecospat_boyce_eval1[1],
+                                  nearctic = xlThinEnv_ecospat_boyce_eval2[1],
+                                  neotropical = xlThinEnv_ecospat_boyce_eval3[1],
+                                  palearctic = xlThinEnv_ecospat_boyce_eval4[1]) %>%
+  add_row(metric = "ROC", native = as.data.frame(xlThinEnv_biomod_model3_indeval1[5])[1,1],
+                          nearctic = as.data.frame(xlThinEnv_biomod_model3_indeval2[5])[1,1],
+                          neotropical = as.data.frame(xlThinEnv_biomod_model3_indeval3[5])[1,1],
+                          palearctic = as.data.frame(xlThinEnv_biomod_model3_indeval4[5])[1,1]) %>%
+  add_row(metric = "TSS", native = as.data.frame(xlThinEnv_biomod_model3_indeval1[5])[2,1],
+                          nearctic = as.data.frame(xlThinEnv_biomod_model3_indeval2[5])[2,1],
+                          neotropical = as.data.frame(xlThinEnv_biomod_model3_indeval3[5])[2,1],
+                          palearctic = as.data.frame(xlThinEnv_biomod_model3_indeval4[5])[2,1]) %>%
+  write.csv("xlThinEnv_ecospat_eval.csv")
+```

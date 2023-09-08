@@ -1,0 +1,467 @@
+---
+title: "Impact Indicators"
+author: "Henriksen et al."
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 3
+    toc_float: true
+---
+
+We outline here our code pipeline for developing invasive alien species impact indicators.
+
+### Uploading packages
+
+```{r, message=FALSE, warning=FALSE}
+# data exploration and analysis
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(lattice)
+library(gridExtra)
+library(data.table)
+#library(inlmisc)
+
+# spatial data exploration and analysis
+library(raster)
+library(rgdal)
+library(tidyverse)
+library(sp)
+library(sf)
+library(tmap)
+library(maps)
+library(rmarkdown)
+library(maptools)
+library(RColorBrewer)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rnaturalearthhires)
+
+# reporting
+library(rmarkdown)
+```
+
+
+```{r}
+load(url("https://github.com/valentinitnelav/RandomScripts/blob/master/NaturalEarth.RData?raw=true"))
+```
+
+
+# Realised impact of invasive alien species
+
+### raw data
+
+
+```{r}
+# EICAT amphibians
+eicat_amph <- read_csv("./input/eicat_amph.csv")
+
+
+# GRIIS amphibian map
+griis_amph_map <- st_read(list.files("./input/griis_shp/", pattern = ".shp", full.names = TRUE))%>% 
+  st_transform("+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" )
+names(griis_amph_map) 
+
+
+# GRIIS amphibian dataset
+griis_amph <- read_csv("./input/griis_amph.csv") %>% 
+  filter(Taxon %in% unique(eicat_amph$Species))
+
+```
+
+```{r}
+temp <- eicat_amph %>% 
+  dplyr::select(Species, Mechanism) %>% 
+  mutate(Mechanism = str_replace(Mechanism, " ", ""),
+         prefix = "ptn",
+         value = TRUE) %>% 
+  unite(prefix, Mechanism, col = Mechanism) %>% 
+  pivot_wider(names_from = Mechanism, values_from = value)
+
+griis_amph <- griis_amph %>% 
+  mutate(realdocimp = ifelse(IsInvasive == "Invasive", TRUE, FALSE),
+         ptndocimp = TRUE,
+         ptnwrst = ifelse(Taxon %in% unique(eicat_amph %>% 
+                                            filter(Magnitude_Kumschick %in% c("Major","Massive")) %>% 
+                                            pull(Species)),
+                          TRUE, FALSE)) %>% 
+  left_join(temp,
+            by = c("Taxon" = "Species")) %>% 
+ mutate_at(c(16:27), ~replace_na(.,FALSE)) 
+
+
+```
+
+
+
+
+```{r}
+firstrec <- griis_amph %>%
+  filter(!is.na(eventDate)) %>% 
+  group_by(Taxon) %>%
+  arrange(Taxon, eventDate) %>%  
+  slice(1) %>% 
+  arrange(eventDate)
+
+imp.growth <-  cbind(firstrec["eventDate"],cumsum(firstrec[,16:27])) %>% 
+  bind_rows(data.frame(eventDate = 2020)) %>% 
+  fill(2:13)
+imp.growth
+```
+
+# realised potential impact
+
+```{r, fig.width= 3}
+ggplot() +
+  geom_line(data = imp.growth,
+            aes(x=eventDate,
+                y=realdocimp),
+            size=0.5, linetype=3) +
+  geom_line(data = imp.growth %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=realdocimp),
+            size=0.5) +
+  geom_point(data = imp.growth %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=realdocimp),
+            shape=21,
+            size=1, 
+            fill="black") +
+  scale_y_continuous(limits = c(1, 10),
+                     breaks=seq(0,10,2)) +
+  scale_x_continuous(limits = c(1800,2025),
+                     breaks=seq(1800,2025,25),
+                     expand = c(0.05, 0.05)) +
+  labs(y = "Cumulative number\nof species",
+       x = "Year") +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 6))
+```
+
+```{r}
+ggsave(
+  "./output/realdocimp.pdf",
+  plot = last_plot(),
+  device = "pdf",
+  scale = 1,
+  width = 70,
+  height = 40,
+  units = c("mm"),
+  dpi = 300
+)
+```
+
+
+```{r}
+temp <- griis_amph %>% 
+  group_by(Location) %>% 
+  summarise(realdocimp = sum(realdocimp == TRUE))
+```
+
+```{r}
+worldMap <- ne_countries(type = "countries", scale = "small", returnclass = "sf")
+
+#reproject to  Eckert IV projection
+
+worldMap <- st_transform(worldMap,
+                         "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" )
+```
+
+
+```{r}
+griis_amph_map_real <- griis_amph_map %>% 
+  right_join(temp, by = c("Region" = "Location")) %>% 
+  st_transform("+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" )
+names(griis_amph_map_real)
+```
+
+```{r}
+NE_box <- st_as_sf(NE_box)
+NE_box <- st_transform(NE_box,
+                         "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" )
+```
+
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_sf(data = griis_amph_map_real,
+          color = NA,
+          aes(fill = realdocimp)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+    scale_fill_gradientn("",
+                      colors = c("#1965B0", "#F7F056", "#DC050C" ),
+                      breaks = c(0, 4),
+                      label = c("LOW", "HIGH")) +
+  theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+```{r}
+ggsave("./output/realdocimp_map.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
+
+# potential impact
+
+```{r, fig.width= 1.5}
+ggplot() +
+  geom_line(data = imp.growth,
+            aes(x=eventDate,
+                y=ptndocimp),
+            size=0.5, linetype=3) +
+  geom_line(data = imp.growth %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=ptndocimp),
+            size=0.5) +
+  geom_point(data = imp.growth %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=ptndocimp),
+            shape=21,
+            size=1, 
+            fill="black") +
+  scale_y_continuous(limits = c(1, 10),
+                     breaks=seq(0,10,2)) +
+  scale_x_continuous(limits = c(1800,2025),
+                     breaks=seq(1800,2025,25),
+                     expand = c(0.05, 0.05)) +
+  labs(y = "Cumulative number\nof species",
+       x = "Year") +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 6))
+
+```
+
+```{r}
+ggsave(
+  "./output/ptndocimp.pdf",
+  plot = last_plot(),
+  device = "pdf",
+  scale = 1,
+  width = 70,
+  height = 40,
+  units = c("mm"),
+  dpi = 300
+)
+```
+
+
+# worst impact
+
+```{r, fig.width= 3}
+ggplot() +
+  geom_line(data = imp.growth,
+            aes(x=eventDate,
+                y=ptnwrst),
+            size=0.5, linetype=3) +
+  geom_line(data = imp.growth %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=ptnwrst),
+            size=0.5) +
+  geom_point(data = imp.growth %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=ptnwrst),
+            shape=21,
+            size=1, 
+            fill="black") +
+  scale_y_continuous(limits = c(1, 10),
+                     breaks=seq(0,10,2)) +
+  scale_x_continuous(limits = c(1800,2025),
+                     breaks=seq(1800,2025,25),
+                     expand = c(0.05, 0.05)) +
+  labs(y = "Cumulative number\nof species",
+       x = "Year") +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 6))
+
+```
+
+```{r}
+ggsave(
+  "./output/ptnwrst.pdf",
+  plot = last_plot(),
+  device = "pdf",
+  scale = 1,
+  width = 70,
+  height = 40,
+  units = c("mm"),
+  dpi = 300
+)
+```
+
+
+# impact mechanisms
+
+```{r}
+temp <- imp.growth %>% 
+  dplyr::select(-c(realdocimp, ptndocimp, ptnwrst)) %>% 
+  pivot_longer(cols = -c(eventDate),
+               names_to = "mechanism_col",
+               values_to = "value") %>% 
+  mutate(mechanism = case_when(mechanism_col == "ptn_Diseasetransmission" ~ "Disease transmission",
+                               mechanism_col == "ptn_Hybridization" ~ "Hybridization",
+                               mechanism_col == "ptn_Predation" ~ "Predation",
+                               mechanism_col == "ptn_Competition" ~ "Competition",
+                               mechanism_col == "ptn_Parasitism" ~ "Parasitism",
+                               mechanism_col == "ptn_Herbivory" ~ "Herbivory",
+                               mechanism_col == "ptn_Interaction" ~ "Interaction",
+                               mechanism_col == "ptn_Chemical,structural and physical" ~ "Chemical, structural and physical",
+                               mechanism_col == "ptn_Poisoning" ~ "Poisoning")) %>% 
+  filter(eventDate == 2020)
+
+plotData <- imp.growth %>% 
+  dplyr::select(-c(realdocimp, ptndocimp, ptnwrst)) %>% 
+  pivot_longer(cols = -c(eventDate),
+               names_to = "mechanism_col",
+               values_to = "value") %>% 
+  mutate(mechanism = case_when(mechanism_col == "ptn_Diseasetransmission" ~ "Disease transmission",
+                               mechanism_col == "ptn_Hybridization" ~ "Hybridization",
+                               mechanism_col == "ptn_Predation" ~ "Predation",
+                               mechanism_col == "ptn_Competition" ~ "Competition",
+                               mechanism_col == "ptn_Parasitism" ~ "Parasitism",
+                               mechanism_col == "ptn_Herbivory" ~ "Herbivory",
+                               mechanism_col == "ptn_Interaction" ~ "Interaction",
+                               mechanism_col == "ptn_Chemical,structural and physical" ~ "Chemical, structural and physical",
+                               mechanism_col == "ptn_Poisoning" ~ "Poisoning")) %>% 
+  distinct(mechanism_col, value, .keep_all = TRUE) %>% 
+  filter(value != 0) %>% 
+  bind_rows(temp)
+```
+
+
+```{r, fig.width= 1.5}
+ggplot() +
+  geom_line(data = plotData,
+            aes(y=eventDate,
+                x=value,
+                color = mechanism),
+            size=0.5, 
+            linetype=3) +
+  geom_line(data = plotData %>%  filter(eventDate<2020),
+            aes(y=eventDate,
+                x=value,
+                color = mechanism),
+            size=0.5) +
+  geom_point(data = plotData %>%  filter(eventDate<2020),
+            aes(y=eventDate,
+                x=value,
+                color = mechanism),
+            shape=21,
+            size=1) +
+  geom_point(data = plotData %>%  filter(eventDate<2020),
+            aes(y=eventDate,
+                x=value,
+                color = mechanism,
+                fill = mechanism),
+            shape=21,
+            size=1,
+            alpha = 0.7) +
+  scale_color_manual(values = c("#CC6677","#332288", "#DDCC77", "#117733", "#88CCEE", "#882255", "#44AA99", "#999933", "#AA4499" )) +
+  scale_fill_manual(values = c("#CC6677","#332288", "#DDCC77", "#117733", "#88CCEE", "#882255", "#44AA99", "#999933", "#AA4499" )) +
+  scale_x_continuous(limits = c(1, 10),
+                     breaks=seq(0,10,2)) +
+  scale_y_continuous(limits = c(1800,2020),
+                     breaks=seq(1800,2020,100),
+                     expand = c(0.05, 0.05)) +
+  guides(color=guide_legend(ncol=1),
+         fill=guide_legend(ncol=1)) +
+  coord_flip() +
+  labs(x = "Cumulative number\nof species",
+       y = "Year") +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 6),
+        legend.position = "none")
+```
+
+
+```{r}
+plotData <- plotData %>% 
+    mutate(value = as.double(value),
+           plot_value = case_when(mechanism_col == "ptn_Predation" ~ value + 0.4,
+                                  mechanism_col == "ptn_Diseasetransmission" ~ value + 0.2,
+                                  mechanism_col == "ptn_Competition" ~ value + 0.3,
+                                  mechanism_col == "ptn_Hybridization" ~ value + 0.1,
+                                  mechanism_col == "ptn_Parasitism" ~ value,
+                                  mechanism_col == "ptn_Herbivory" ~ value - 0.1,
+                                  mechanism_col == "ptn_Interaction" ~ value - 0.2,
+                                  mechanism_col == "ptn_Chemical,structural and physical" ~ value - 0.3,
+                                  mechanism_col == "ptn_Poisoning" ~ value - 0.4))
+```
+
+
+```{r, fig.width= 3}
+ggplot() +
+  geom_line(data = plotData,
+            aes(x=eventDate,
+                y=plot_value,
+                color = mechanism),
+            size=0.5, 
+            linetype=3) +
+  geom_line(data = plotData %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=plot_value,
+                color = mechanism),
+            size=0.5) +
+  geom_point(data = plotData %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=plot_value,
+                color = mechanism),
+            shape=21,
+            size=1) +
+  geom_point(data = plotData %>%  filter(eventDate<2020),
+            aes(x=eventDate,
+                y=plot_value,
+                color = mechanism,
+                fill = mechanism),
+            shape=21,
+            size=1,
+            alpha = 0.7) +
+  scale_color_manual(values = c("#CC6677","#332288", "#DDCC77", "#117733", "#88CCEE", "#882255", "#44AA99", "#999933", "#AA4499" )) +
+  scale_fill_manual(values = c("#CC6677","#332288", "#DDCC77", "#117733", "#88CCEE", "#882255", "#44AA99", "#999933", "#AA4499" )) +
+  scale_y_continuous(limits = c(0, 10),
+                     breaks=seq(0,10,2)) +
+  scale_x_continuous(limits = c(1800,2025),
+                     breaks=seq(1800,2025,25),
+                     expand = c(0.05, 0.05)) +
+  guides(color=guide_legend(ncol=1),
+         fill=guide_legend(ncol=1)) +
+  labs(y = "Cumulative number\nof species",
+       x = "Year") +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 6),
+        legend.position = "none")
+```
+
+```{r}
+ggsave(
+  "./output/mechanism.pdf",
+  plot = last_plot(),
+  device = "pdf",
+  scale = 1,
+  width = 70,
+  height = 100,
+  units = c("mm"),
+  dpi = 300
+)
+```
+
+

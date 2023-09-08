@@ -1,0 +1,411 @@
+---
+title: "sTWIST"
+output: html_notebook
+---
+
+
+```{r, results= "hide"}
+library(raster)
+library(rgdal)
+library(tidyverse)
+library(sp)
+library(sf)
+library(maps)
+library(rmarkdown)
+library(maptools)
+```
+
+```{r}
+load(url("https://github.com/valentinitnelav/RandomScripts/blob/master/NaturalEarth.RData?raw=true"))
+```
+
+
+```{r}
+worldMap <- ne_countries(type = "countries", scale = "small", returnclass = "sf")
+
+#reproject to  Eckert IV projection
+
+worldMap <- st_transform(worldMap,
+                         "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" )
+NE_box <- st_as_sf(NE_box)
+NE_box <- st_transform(NE_box,
+                         "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" )
+```
+
+```{r}
+map_raster <- list.files(path = "./input", pattern = "tif", full.names=TRUE)
+map_raster <- stack(map_raster)
+names(map_raster)
+```
+
+# Visualising alien species with disease transmission impact
+
+proj_Diseasetransmission
+
+
+
+```{r}
+map_raster_r <- projectRaster(map_raster[["proj_Diseasetransmission"]],
+                            crs = crs(worldMap))
+map_raster_r <- mask(map_raster_r, NE_box)
+```
+
+```{r}
+map_raster_p <- rasterToPoints(map_raster_r)
+
+#Make the points a dataframe for ggplot
+map_raster_p <- data.frame(map_raster_p)
+#Make appropriate column headings
+colnames(map_raster_p) <- c("Longitude", "Latitude", "MAP")
+```
+
+```{r}
+maxValue(map_raster_r)
+```
+
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_raster(data = map_raster_p,
+              aes(x = Longitude,
+                  y = Latitude,
+                  fill = MAP)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+#  scale_fill_gradientn("",
+#                      low = "white", 
+#                      high = "brown",
+#                      breaks = c(0, maxValue(map_raster_r)),
+#                      label = c("LOW", "HIGH")) +
+  scale_fill_gradientn("",
+                      colors = c("#1965B0", "#F7F056", "#DC050C" ),
+                      breaks = c(0, maxValue(map_raster_r)),
+                      label = c("LOW", "HIGH")) +
+  theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+```{r}
+ggsave("./output/Diseasetransmission.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
+
+
+# Visualising alien species with competition impact
+
+```{r}
+map_raster_r <- projectRaster(map_raster[["proj_Competition"]],
+                            crs = crs(worldMap))
+map_raster_r <- mask(map_raster_r, NE_box)
+```
+
+```{r}
+map_raster_p <- rasterToPoints(map_raster_r)
+#Make the points a dataframe for ggplot
+map_raster_p <- data.frame(map_raster_p)
+#Make appropriate column headings
+colnames(map_raster_p) <- c("Longitude", "Latitude", "MAP")
+```
+
+```{r}
+maxValue(map_raster_r)
+```
+
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_raster(data = map_raster_p,
+              aes(x = Longitude,
+                  y = Latitude,
+                  fill = MAP)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+#  scale_fill_gradientn("",
+#                      low = "white", 
+#                      high = "brown",
+#                      breaks = c(0, maxValue(map_raster_r)),
+#                      label = c("LOW", "HIGH")) +
+  scale_fill_gradientn("",
+                      colors = c("#1965B0", "#F7F056", "#DC050C" ),
+                      breaks = c(0, maxValue(map_raster_r)),
+                      label = c("LOW", "HIGH")) +
+  theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+```{r}
+ggsave("./output/Competition.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
+
+
+
+# Visualising alien species with predation impact
+
+```{r}
+map_raster_r <- projectRaster(map_raster[["proj_Predation"]],
+                            crs = crs(worldMap))
+map_raster_r <- mask(map_raster_r, NE_box)
+```
+
+```{r}
+map_raster_p <- rasterToPoints(map_raster_r)
+#Make the points a dataframe for ggplot
+map_raster_p <- data.frame(map_raster_p)
+#Make appropriate column headings
+colnames(map_raster_p) <- c("Longitude", "Latitude", "MAP")
+```
+
+
+```{r}
+maxValue(map_raster_r)
+```
+
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_raster(data = map_raster_p,
+              aes(x = Longitude,
+                  y = Latitude,
+                  fill = MAP)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+#  scale_fill_gradientn("",
+#                      low = "white", 
+#                      high = "brown",
+#                      breaks = c(0, maxValue(map_raster_r)),
+#                      label = c("LOW", "HIGH")) +
+  scale_fill_gradientn("",
+                      colors = c("#1965B0", "#F7F056", "#DC050C" ),
+                      breaks = c(0, maxValue(map_raster_r)),
+                      label = c("LOW", "HIGH")) +
+  theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+
+```{r}
+ggsave("./output/Predation.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
+
+
+
+# Visualising alien species with hybridization impact
+
+```{r}
+map_raster_r <- projectRaster(map_raster[["proj_Hybridization"]],
+                            crs = crs(worldMap))
+map_raster_r <- mask(map_raster_r, NE_box)
+```
+
+```{r}
+map_raster_p <- rasterToPoints(map_raster_r)
+#Make the points a dataframe for ggplot
+map_raster_p <- data.frame(map_raster_p)
+#Make appropriate column headings
+colnames(map_raster_p) <- c("Longitude", "Latitude", "MAP")
+```
+
+
+```{r}
+maxValue(map_raster_r)
+```
+
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_raster(data = map_raster_p,
+              aes(x = Longitude,
+                  y = Latitude,
+                  fill = MAP)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+#  scale_fill_gradientn("",
+#                      low = "white", 
+#                      high = "brown",
+#                      breaks = c(0, maxValue(map_raster_r)),
+#                      label = c("LOW", "HIGH")) +
+  scale_fill_gradientn("",
+                      colors = c("#1965B0", "#F7F056", "#DC050C" ),
+                      breaks = c(0, maxValue(map_raster_r)),
+                      label = c("LOW", "HIGH")) +
+    theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+
+```{r}
+ggsave("./output/Hybridization.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
+
+# Visualising all species
+
+```{r}
+map_raster_r <- projectRaster(map_raster[["projdocimp"]],
+                            crs = crs(worldMap))
+map_raster_r <- mask(map_raster_r, NE_box)
+```
+
+```{r}
+map_raster_p <- rasterToPoints(map_raster_r)
+
+#Make the points a dataframe for ggplot
+map_raster_p <- data.frame(map_raster_p)
+#Make appropriate column headings
+colnames(map_raster_p) <- c("Longitude", "Latitude", "MAP")
+```
+
+```{r}
+maxValue(map_raster_r)
+```
+
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_raster(data = map_raster_p,
+              aes(x = Longitude,
+                  y = Latitude,
+                  fill = MAP)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+#  scale_fill_gradientn("",
+#                      low = "white", 
+#                      high = "brown",
+#                      breaks = c(0, maxValue(map_raster_r)),
+#                      label = c("LOW", "HIGH")) +
+  scale_fill_gradientn("",
+                      colors = c("#1965B0", "#F7F056", "#DC050C" ),
+                      breaks = c(0, maxValue(map_raster_r)),
+                      label = c("LOW", "HIGH")) +
+  theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+```{r}
+ggsave("./output/projdocimp.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_raster(data = map_raster_p,
+              aes(x = Longitude,
+                  y = Latitude,
+                  fill = MAP)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+  scale_fill_gradientn("",
+                      colors = c("white", as.character(inlmisc::GetColors(9, 
+                                                                  scheme = "discrete rainbow"))),
+                      breaks = c(0, maxValue(map_raster_r)),
+                      label = c("LOW", "HIGH")) +
+  theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+```{r}
+ggsave("./output/projdocimp_2.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
+
+
+
+
+# Visualising species with only worst impact
+
+```{r}
+map_raster_r <- projectRaster(map_raster[["projwrst"]],
+                            crs = crs(worldMap))
+map_raster_r <- mask(map_raster_r, NE_box)
+```
+
+```{r}
+map_raster_p <- rasterToPoints(map_raster_r)
+
+#Make the points a dataframe for ggplot
+map_raster_p <- data.frame(map_raster_p)
+#Make appropriate column headings
+colnames(map_raster_p) <- c("Longitude", "Latitude", "MAP")
+```
+
+```{r}
+maxValue(map_raster_r)
+```
+
+
+```{r, fig.width= 3.14}
+ggplot() +
+  geom_raster(data = map_raster_p,
+              aes(x = Longitude,
+                  y = Latitude,
+                  fill = MAP)) +
+  geom_sf(data = worldMap,
+          fill = NA,
+          size = 0.1) +
+  geom_sf(data = NE_box,
+          fill = NA,
+          size = 0.1) +
+#  scale_fill_gradientn("",
+#                      low = "white", 
+#                      high = "brown",
+#                      breaks = c(0, maxValue(map_raster_r)),
+#                      label = c("LOW", "HIGH")) +
+  scale_fill_gradientn("",
+                      colors = c("#1965B0", "#F7F056", "#DC050C" ),
+                      breaks = c(0, maxValue(map_raster_r)),
+                      label = c("LOW", "HIGH")) +
+  theme_void() +
+  theme(plot.margin = unit(c(t=0, r=2, b=0, l=0), unit="cm"),
+        legend.position = "bottom",
+        legend.key.height = unit(0.1, "cm"),
+        text = element_text(size = 8))
+
+```
+
+```{r}
+ggsave("./output/projwrst.pdf",plot = last_plot(), width=80, dpi = 300, units="mm")
+```
